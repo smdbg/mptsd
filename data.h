@@ -1,3 +1,4 @@
+/* smdbg fork modifications, 2026-11-16: see CHANGELOG.md. */
 /*
  * mptsd data header file
  * Copyright (C) 2010-2011 Unix Solutions Ltd.
@@ -34,6 +35,7 @@
 #include "libtsfuncs/tsdata.h"
 
 #include "pidref.h"
+#include "cas_remux.h"
 
 typedef enum { udp_sock, tcp_sock } channel_source;
 
@@ -45,6 +47,9 @@ typedef struct {
 	unsigned int port;
 	unsigned int rtp;
 } CHANSRC;
+
+#include "eit_forward.h"
+#include "output_status.h"
 
 #define MAX_CHANNEL_SOURCES 8
 
@@ -66,6 +71,9 @@ typedef struct {
 	int			radio;
 	int			lcn;
 	int			lcn_visible;
+	/* Explicit common EMM origin; never infer sharing from CAID alone. */
+	char        emm_shared_id[65];
+	uint16_t    emm_shared_caid, emm_shared_pid, emm_shared_output_pid;
 	char *		id;
 	char *		name;
 	int			eit_mode; /* 0 = ignore EIT data from input
@@ -99,6 +107,8 @@ typedef struct {
 typedef struct {
 	PIDREF *pidref;			/* Rewritten pids list */
 
+	EIT_FORWARD eit_forward;
+	uint16_t input_service_id;
 	uint16_t nit_pid;		/* Pid of the NIT, default 0x10 */
 	uint16_t pmt_pid;		/* Pid of the original PMT, used to replace PMT */
 	uint16_t pcr_pid;		/* PCR pid */
@@ -120,7 +130,8 @@ typedef struct {
 	struct ts_pmt *last_pmt;		/* The last incoming PMT */
 } INPUT_STREAM;
 
-typedef struct {
+typedef struct input {
+	struct ca_input *cas;
 	char  *name;
 	CHANNEL *channel;
 	int sock;				/* Server socket */
@@ -164,7 +175,8 @@ typedef struct {
 	OBUF_STATUS	status;
 } OBUF;
 
-typedef struct {
+typedef struct output {
+	struct ca_output *cas;
 	struct in_addr out_host;
 	int out_port;
 	int out_sock;			/* The udp socket */
@@ -181,6 +193,8 @@ typedef struct {
 	OBUF obuf[2];			// Output buffers
 	double output_bitrate;	// Output bitrate (bps)
 
+	OUTPUT_STATUS status;
+	unsigned frame_null_packets;
 	uint64_t traffic;
 
 	uint64_t traffic_period;
@@ -225,6 +239,8 @@ typedef struct {
 	uint32_t	_freq;
 	uint8_t		_modulation;
 	uint32_t	_symbol_rate;
+	int services_count, services_defined;
+	uint32_t services[31], lcns[31];
 } NIT;
 
 EPG_ENTRY *	epg_new			(time_t start, int duration, char *encoding, char *event, char *short_desc, char *long_desc);

@@ -1,3 +1,4 @@
+/* smdbg fork modifications, 2026-11-16: see CHANGELOG.md. */
 /*
  * mptsd output mix packets
  * Copyright (C) 2010-2011 Unix Solutions Ltd.
@@ -124,12 +125,14 @@ void * output_handle_mix(void *_config) {
 		unsigned int data_packets;
 		int data_size;
 		uint8_t *data;
+		uint8_t psi_packet[TS_PACKET_SIZE];
 		for (data_packets=0;data_packets<packets;data_packets++) {
 			if (o->dienow)
 				break;
 
 			// Try the PSI data first
-			data = cbuf_get(o->psibuf, TS_PACKET_SIZE, &data_size);
+			data_size = cbuf_read(o->psibuf, psi_packet, TS_PACKET_SIZE);
+			data = data_size ? psi_packet : NULL;
 			if (data && data_size == TS_PACKET_SIZE)
 				goto SEND_PACKET;
 
@@ -240,6 +243,8 @@ SEND_PACKET:
 				}
 				uint8_t *bufptr = curbuf->buf + ((data_packets + nulls) * TS_PACKET_SIZE);
 				memcpy(bufptr, data, TS_PACKET_SIZE);
+				if (ts_packet_get_pid(bufptr) == 0x12)
+					ts_packet_set_cont(bufptr, o->pid_eit_cont++);
 			}
 
 			// Increase sended packets

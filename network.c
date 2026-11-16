@@ -1,3 +1,4 @@
+/* smdbg fork modifications, 2026-11-16: see CHANGELOG.md. */
 /*
  * mptsd network routines
  * Copyright (C) 2010-2011 Unix Solutions Ltd.
@@ -47,6 +48,7 @@ int connect_udp(struct sockaddr_in send_to) {
 	}
 	int on = 1;
 	setsockopt(sendsock, SOL_SOCKET, SO_REUSEADDR, &on, sizeof(on));
+	setsockopt(sendsock, IPPROTO_IP, IP_MULTICAST_LOOP, &on, sizeof(on));
 	// subscribe to multicast group
 	// LOGf("Using ttl %d\n", multicast_ttl);
 	if (IN_MULTICAST(ntohl(send_to.sin_addr.s_addr))) {

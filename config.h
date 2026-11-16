@@ -1,3 +1,4 @@
+/* smdbg fork modifications, 2026-11-16: see CHANGELOG.md. */
 /*
  * mptsd configuration header file
  * Copyright (C) 2010-2011 Unix Solutions Ltd.
@@ -43,6 +44,10 @@ typedef struct {
 
 	int				multicast_ttl;
 	struct in_addr	output_intf;
+	/* Optional common EMM multicast section feed, independent of AV inputs. */
+	char emm_shared_id[65];
+	uint16_t emm_shared_caid, emm_shared_port;
+	struct in_addr emm_shared_group, emm_shared_interface;
 
 	char			*global_conf;
 	char			*channels_conf;
@@ -63,6 +68,8 @@ typedef struct {
 										// 3 - move PCRs and rewrite them
 	int				use_lcn;
 
+	uint16_t original_network_id;
+	uint8_t table_version;
 	uint16_t		network_id;			// For NIT && SDT
 	uint16_t		transport_stream_id;// For NIT
 	char 			*network_name;		// For NIT

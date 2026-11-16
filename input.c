@@ -1,3 +1,4 @@
+/* smdbg fork modifications, 2026-11-16: see CHANGELOG.md. */
 /*
  * mptsd input handling
  * Copyright (C) 2010-2011 Unix Solutions Ltd.
@@ -65,8 +66,9 @@ int input_process_pat(INPUT *r) {
 				s->nit_pid = prg->pid;
 			} else { // PAT
 				s->pmt_pid = prg->pid;
+				s->input_service_id = prg->program;
 				num_programs++;
-				break; // Get only the first program
+				// Continue counting: multi-program input must not be silently misrouted.
 			}
 		}
 	}
@@ -103,53 +105,6 @@ void input_rewrite_pat(INPUT *r) {
 	// Save rewritten packet
 	ts_pat_regenerate_packets(new_pat);
 	s->pat_rewritten = new_pat;
-}
-
-void input_rewrite_pmt(INPUT *r) {
-	INPUT_STREAM *s = &r->stream;
-	struct ts_pmt *new_pmt = ts_pmt_copy(s->pmt);
-	if (!new_pmt)
-		return;
-
-	// Rewrite PMT pids
-	new_pmt->ts_header.pid = pidref_get_new_pid(s->pidref, s->pmt_pid);
-	new_pmt->section_header->ts_id_number = r->channel->service_id;
-
-	uint16_t org_pcr_pid = new_pmt->PCR_pid;
-	s->pcr_pid = new_pmt->PCR_pid;
-	pidref_add(s->pidref, org_pcr_pid, s->pidref->base_pid);
-	new_pmt->PCR_pid = s->pidref->base_pid;
-	r->output_pcr_pid = new_pmt->PCR_pid;
-	s->pidref->base_pid++;
-
-	int i;
-	for (i=0;i<new_pmt->streams_num;i++) {
-		struct ts_pmt_stream *stream = new_pmt->streams[i];
-		if (stream->pid == org_pcr_pid) { // Already rewritten and added to pidref
-			stream->pid = new_pmt->PCR_pid;
-			continue;
-		}
-		pidref_add(s->pidref, stream->pid, s->pidref->base_pid);
-		stream->pid = s->pidref->base_pid;
-		s->pidref->base_pid++;
-	}
-
-	ts_pmt_regenerate_packets(new_pmt);
-	s->pmt_rewritten = new_pmt;
-}
-
-void input_rewrite_eit(INPUT *r)
-{
-	INPUT_STREAM *s = &r->stream;
-	struct ts_eit *new_eit = ts_eit_copy(s->eit);
-	if (!new_eit)
-		return;
-
-	// Rewrite EIT data
-	new_eit->transport_stream_id = config->transport_stream_id;
-
-	ts_eit_regenerate_packets(new_eit);
-	s->eit_rewritten = new_eit;
 }
 
 void input_buffer_add(INPUT *r, uint8_t *data, int datasize) {
@@ -249,107 +204,23 @@ int process_pat(INPUT *r, uint16_t pid, uint8_t *ts_packet) {
 }
 
 int process_pmt(INPUT *r, uint16_t pid, uint8_t *ts_packet) {
-	INPUT_STREAM *s = &r->stream;
+    if (!pid || pid != r->stream.pmt_pid) return 0;
+    ca_pmt_packet(r, ts_packet);
+    return -1;
+}
 
-	if (!pid || pid != s->pmt_pid)
-		return 0;
-
-	s->pmt = ts_pmt_push_packet(s->pmt, ts_packet);
-
-	
-	if (s->last_pmt->initialized) {
-		if (!s->pmt->initialized) return -1;  // Incomplete
-		if (!ts_pmt_is_same(s->pmt, s->last_pmt)) {
-			proxy_log(r, "========================PMT changed.========================");
-			return -2; // Reconnect
-		}
-		ts_pmt_free(&s->last_pmt);
-		s->last_pmt = ts_pmt_alloc();
-	}
-
-	s->last_pmt = ts_pmt_push_packet(s->last_pmt, ts_packet);
-
-	if (s->pmt->initialized) {
-		if (!s->pmt_rewritten || !s->pmt_rewritten->initialized) {
-			input_rewrite_pmt(r);
-#if dump_tables
-			proxy_log(r, "PMT found!");
-			proxy_log(r, "*** Original PMT ***");
-			ts_pmt_dump(s->pmt);
-			proxy_log(r, "*** Rewritten PMT ***");
-			ts_pmt_dump(s->pmt_rewritten);
-			// pidref_dump(s->pidref);
-#endif
-		}
-		if (s->pmt_rewritten && s->pmt_rewritten->initialized) {
-			int j;
-			struct ts_pmt *P = s->pmt_rewritten;
-			for (j=0;j<P->section_header->num_packets;j++) {
-				ts_packet_set_cont(P->section_header->packet_data + (j * TS_PACKET_SIZE), j + s->pid_pmt_cont);
-			}
-			P->ts_header.continuity = s->pid_pmt_cont;
-			s->pid_pmt_cont += P->section_header->num_packets;
-			input_buffer_add(r, P->section_header->packet_data, P->section_header->num_packets * TS_PACKET_SIZE);
-		}
-		return -1;
-	}
-	return 1;
+static void emit_input_eit(void *opaque, const uint8_t *packets, size_t len) {
+    INPUT *r = opaque;
+    if (!r->dienow && !r->disabled && config->output && config->output->psibuf)
+        cbuf_fill(config->output->psibuf, (uint8_t *)packets, (int)len);
 }
 
 int process_eit(INPUT *r, uint8_t *ts_packet) {
-	INPUT_STREAM *s = &r->stream;
-
-	if (r->channel->eit_mode == 0) {
-		return -1;
-	}
-
-	s->eit = ts_eit_push_packet(s->eit, ts_packet);
-
-	if (s->eit->initialized)
-	{
-		uint16_t service_id = s->eit->section_header->ts_id_number;
-		uint16_t table_id = s->eit->section_header->table_id;
-		//ts_LOGf("EIT for service_id service_id %d with table_id %d\n", service_id, table_id);
-		if (service_id != r->channel->service_id)
-		{
-			//ts_LOGf("skipping EIT for ts_id_number %d/%d\n", service_id, table_id);
-			return -2;
-		}
-		if (!s->eit_rewritten || (s->eit_rewritten && !s->eit_rewritten->initialized))
-		{
-			input_rewrite_eit(r);
-#if dump_tables
-			proxy_log(r, "EIT found!");
-			proxy_log(r, "*** Original EIT ***");
-			ts_eit_dump(s->eit);
-			proxy_log(r, "*** Rewritten EIT ***");
-			ts_eit_dump(s->eit_rewritten);
-#endif
-		}
-		if (s->eit_rewritten && s->eit_rewritten->initialized)
-		{
-			//ts_LOGf("sending EIT for service_id service_id %d with table_id %d\n", service_id, table_id);
-			int j;
-			struct ts_eit *P = s->eit_rewritten;
-			for (j = 0; j < P->section_header->num_packets; j++)
-			{
-				ts_packet_set_cont(P->section_header->packet_data + (j * TS_PACKET_SIZE), j + s->pid_eit_cont);
-			}
-			P->ts_header.continuity = s->pid_eit_cont;
-			s->pid_eit_cont += P->section_header->num_packets;
-			input_buffer_add(r, P->section_header->packet_data, P->section_header->num_packets * TS_PACKET_SIZE);
-
-			// reset structs for next EIT packets
-			ts_eit_free(&s->eit);
-			s->eit = ts_eit_alloc();
-			ts_eit_free(&s->eit_rewritten);
-			s->eit_rewritten = NULL;
-			return 1;
-		}
-		return -3;
-		table_id++; // disable warning unused, this code is not reached
-	}
-	return 0;
+    if (r->channel->eit_mode != 1) return -1;
+    eit_forward_packet(&r->stream.eit_forward, ts_packet,
+        r->stream.input_service_id, r->channel->service_id,
+        config->transport_stream_id, config->original_network_id, emit_input_eit, r);
+    return 1;
 }
 
 int in_worktime(int start, int end) {
@@ -456,15 +327,21 @@ void * input_stream(void *self) {
 				continue;
 			}
 
+			ca_input_tick(r);
 			int i;
-			for (i=0; i<readen; i+=188) {
+			for (i=0; i + 188 <= readen; i+=188) {
 
 				if (r->dienow)
 					goto QUIT;
 				uint8_t *ts_packet = (uint8_t *)buf + i;
 				uint16_t pid = ts_packet_get_pid(ts_packet);
 
-				int pat_result = process_pat(r, pid, ts_packet);
+				if (pid == 1) {
+                    ca_cat_packet(r, ts_packet);
+                    continue;
+                }
+
+                int pat_result = process_pat(r, pid, ts_packet);
 				if (pat_result == -2)
 					goto RECONNECT;
 				if (pat_result < 0) // PAT incomplete
@@ -498,7 +375,13 @@ void * input_stream(void *self) {
 
 				// Yes, we have enough data to start outputing
 				if (s->input_pcr) {
-					pidref_change_packet_pid(ts_packet, pid, s->pidref);
+					if (ca_shared_emm_packet(r, pid, ts_packet)) continue;
+					/* Pass only declared ES/PCR and CA PIDs. CAS uses a separate,
+                     * per-input output range so foreign PIDs cannot collide. */
+                    uint16_t mapped = ca_packet_pid(r, pid);
+                    if (!mapped) mapped = pidref_get_new_pid(s->pidref, pid);
+                    if (!mapped) continue;
+                    ts_packet_set_pid(ts_packet, mapped);
 					input_buffer_add(r, ts_packet, TS_PACKET_SIZE);
 					if (!r->input_ready)
 						r->input_ready = 1;
@@ -509,15 +392,18 @@ void * input_stream(void *self) {
 		}
 		proxy_log(r, "fdread timeout");
 RECONNECT:
+        ca_input_reset(r);
 		proxy_log(r, "Reconnect");
 		shutdown_fd(&(r->sock));
 		chansrc_next(r->channel);
 		continue;
 STOP:
+        ca_input_reset(r);
 		proxy_log(r, "Stop");
 		shutdown_fd(&(r->sock));
 		continue;
 QUIT:
+        ca_input_reset(r);
 		break;
 	}
 	proxy_close(config->inputs, &r);

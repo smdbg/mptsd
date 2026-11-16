@@ -1,3 +1,4 @@
+/* smdbg fork modifications, 2026-11-16: see CHANGELOG.md. */
 /*
  * mptsd configuration
  * Copyright (C) 2010-2011 Unix Solutions Ltd.
@@ -107,6 +108,13 @@ int config_load_channels(CONFIG *conf) {
 
 	//iniparser_dump(ini, stdout);
 	LIST *channels = list_new("channels");
+	char shared_ids[32][65] = {{0}};
+	uint16_t shared_caids[32] = {0};
+	unsigned shared_count = 0;
+	if (conf->emm_shared_id[0]) {
+		strcpy(shared_ids[0], conf->emm_shared_id); shared_caids[0] = conf->emm_shared_caid;
+		shared_count = 1;
+	}
 
 	// Parse channels file
 	conf->provider_name = ini_get_string_copy(ini, NULL, "Global:provider_name");
@@ -156,13 +164,39 @@ int config_load_channels(CONFIG *conf) {
 
 		char *worktime = ini_get_string(ini, NULL, "Channel%d:worktime", i);
 		int sh=0,sm=0,eh=0,em=0;
-		if (worktime && sscanf(worktime, "%02d:%02d-%02d:%02d", &sh, &sm, &eh, &em) == 4) {
+		if (channel && worktime && sscanf(worktime, "%02d:%02d-%02d:%02d", &sh, &sm, &eh, &em) == 4) {
 			channel->worktime_start = sh * 3600 + sm * 60;
 			channel->worktime_end   = eh * 3600 + em * 60;
 		}
 
 		// Channel is initialized, add it to channels list
 		if (channel) {
+			char *shared = ini_get_string(ini, NULL, "Channel%d:emm_shared_id", i);
+			int caid = ini_get_int(ini, 0, "Channel%d:emm_shared_caid", i);
+			int pid = ini_get_int(ini, 0, "Channel%d:emm_shared_pid", i);
+			if (shared || caid || pid) {
+				if (!shared || !*shared || strlen(shared) > 64 ||
+				    strspn(shared, "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_.-") != strlen(shared) ||
+				    caid < 1 || caid > 65535 || pid < 32 || pid > 8190) {
+					LOGf("CONFIG: Channel%d invalid shared EMM identity/CAID/PID.\n", i);
+					channel_free(&channel); list_free(&channels, NULL, (void (*)(void **))channel_free);
+					iniparser_freedict(&ini); return 0;
+				}
+				unsigned group = 0;
+				while (group < shared_count && strcmp(shared_ids[group], shared)) group++;
+				if (group < shared_count && shared_caids[group] != caid) {
+					LOGf("CONFIG: Channel%d shared EMM identity has conflicting CAID.\n", i);
+					channel_free(&channel); list_free(&channels, NULL, (void (*)(void **))channel_free);
+					iniparser_freedict(&ini); return 0;
+				}
+				if (group == shared_count) {
+					strcpy(shared_ids[group], shared); shared_caids[group] = caid; shared_count++;
+				}
+				strcpy(channel->emm_shared_id, shared);
+				channel->emm_shared_caid = caid; channel->emm_shared_pid = pid;
+				/* Per-input CA blocks occupy 4096..8063; ordinary PIDs <1024. */
+				channel->emm_shared_output_pid = 8064 + group;
+			}
 			num_channels++;
 			list_add(channels, channel);
 		}
@@ -203,6 +237,11 @@ int config_load_channels(CONFIG *conf) {
 					}
 				}
 				if (src_found > -1) {
+					if (strcmp(chan->emm_shared_id, restr->channel->emm_shared_id) ||
+					    chan->emm_shared_caid != restr->channel->emm_shared_caid ||
+					    chan->emm_shared_pid != restr->channel->emm_shared_pid ||
+					    chan->emm_shared_output_pid != restr->channel->emm_shared_output_pid)
+						restr->reconnect = 1;
 					/* New configuration contains existing source, just update the reference */
 					chansrc_set(chan, src_found);
 					restr->channel = chan;
@@ -248,7 +287,36 @@ int config_load_global(CONFIG *conf) {
 		LOGf("CONFIG: Error loading global config (%s)\n", conf->global_conf);
 		return 0;
 	}
+    FREE(conf->output->status.path);
+    conf->output->status.path = ini_get_string_copy(ini, NULL, "Global:status_file");
+    int status_interval = ini_get_int(ini, 10000, "Global:status_interval_ms");
+    if (conf->output->status.path && (conf->output->status.path[0] != '/' ||
+        status_interval < 1000 || status_interval > 3600000)) {
+        fprintf(stderr, "Invalid status_file (absolute path required) or status_interval_ms (1000..3600000).\n");
+        exit(1);
+    }
+    conf->output->status.interval_ms = status_interval;
 	conf->network_id		= ini_get_int(ini, 0,    "Global:network_id");
+	conf->original_network_id = ini_get_int(ini, conf->network_id, "Global:original_network_id");
+	conf->table_version = ini_get_int(ini, 0, "Global:table_version") & 31;
+	char *shared = ini_get_string(ini, NULL, "Global:emm_shared_id");
+	char *group = ini_get_string(ini, NULL, "Global:emm_shared_group");
+	char *intf = ini_get_string(ini, NULL, "Global:emm_shared_interface");
+	int caid = ini_get_int(ini, 0, "Global:emm_shared_caid");
+	int port = ini_get_int(ini, 0, "Global:emm_shared_port");
+	if (shared || group || intf || caid || port) {
+		if (!shared || !*shared || strlen(shared) > 64 ||
+		    strspn(shared, "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_.-") != strlen(shared) ||
+		    !group || !intf || inet_pton(AF_INET, group, &conf->emm_shared_group) != 1 ||
+		    !IN_MULTICAST(ntohl(conf->emm_shared_group.s_addr)) ||
+		    inet_pton(AF_INET, intf, &conf->emm_shared_interface) != 1 ||
+		    IN_MULTICAST(ntohl(conf->emm_shared_interface.s_addr)) ||
+		    caid < 1 || caid > 65535 || port < 1 || port > 65535) {
+			LOG("CONFIG: Invalid global shared EMM multicast configuration.\n");
+			iniparser_freedict(&ini); return 0;
+		}
+		strcpy(conf->emm_shared_id, shared); conf->emm_shared_caid = caid; conf->emm_shared_port = port;
+	}
 	conf->timeouts.pat		= ini_get_int(ini, 100,  "Timeouts:pat");
 	conf->timeouts.pmt		= ini_get_int(ini, 200,  "Timeouts:pmt");
 	conf->timeouts.sdt		= ini_get_int(ini, 500,  "Timeouts:sdt");
@@ -278,7 +346,25 @@ int config_load_nit(CONFIG *conf) {
 		char *sr       = ini_get_string(ini, NULL, "Transponder%d:symbol_rate", i);
 		if (ts_id && freq && mod && sr) {
 			if (strlen(freq) == 9 && strlen(sr) == 8) {
-				list_add(conf->nit, nit_new(ts_id, freq, mod, sr));
+                NIT *n = nit_new(ts_id, freq, mod, sr);
+                char *services = ini_get_string_copy(ini, NULL, "Transponder%d:services", i);
+                n->services_defined = services != NULL;
+                if (services) {
+                    char *save = NULL;
+                    for (char *v = strtok_r(services, ",", &save); v; v = strtok_r(NULL, ",", &save)) {
+                        unsigned sid, type, lcn, visible;
+                        char extra;
+                        if (sscanf(v, "%u:%u:%u:%u%c", &sid, &type, &lcn, &visible, &extra) != 4 ||
+                            !sid || sid > 65535 || type > 255 || lcn > 1023 || visible > 1 || n->services_count >= 31) {
+                            fprintf(stderr, "Invalid NIT service list in Transponder%d\n", i); exit(1);
+                        }
+                        int j = n->services_count++;
+                        n->services[j] = (sid << 8) | type;
+                        n->lcns[j] = (sid << 16) | (visible << 15) | 0x7c00 | lcn;
+                    }
+                    free(services);
+                }
+                list_add(conf->nit, n);
 			}
 		}
 	}
@@ -333,7 +419,7 @@ static void config_channel_init_epg(CONFIG *conf, CHANNEL *c, EPG_ENTRY *now, EP
 	// LOGf("EPG  : %s | Version %d\n", c->epg_version);
 	c->epg_version++;
 
-	struct ts_eit *eit_now = ts_eit_alloc_init_pf(c->service_id, conf->transport_stream_id, conf->network_id, 0, 1);
+	struct ts_eit *eit_now = ts_eit_alloc_init_pf(c->service_id, conf->transport_stream_id, conf->original_network_id, 0, 1);
 	eit_now->section_header->version_number = c->epg_version;
 	if (now) {
 		ts_eit_add_short_event_descriptor(eit_now, now->event_id, 1, now->start, now->duration, now->event, now->short_desc);
@@ -341,7 +427,7 @@ static void config_channel_init_epg(CONFIG *conf, CHANNEL *c, EPG_ENTRY *now, EP
 	}
 	ts_eit_regenerate_packets(eit_now);
 
-	struct ts_eit *eit_next = ts_eit_alloc_init_pf(c->service_id, conf->transport_stream_id, conf->network_id, 1, 1);
+	struct ts_eit *eit_next = ts_eit_alloc_init_pf(c->service_id, conf->transport_stream_id, conf->original_network_id, 1, 1);
 	eit_next->section_header->version_number = c->epg_version;
 	if (next) {
 		ts_eit_add_short_event_descriptor(eit_next, next->event_id, 1, next->start, next->duration, next->event, next->short_desc);
@@ -397,6 +483,7 @@ int config_load_epg(CONFIG *conf) {
 	list_lock(conf->channels);
 	list_for_each(conf->channels, lc, lctmp) {
 		CHANNEL *c = lc->data;
+		if (c->eit_mode == 1) continue;
 		EPG_ENTRY *enow  = config_load_epg_entry(ini, "now", c->id);
 		EPG_ENTRY *enext = config_load_epg_entry(ini, "next", c->id);
 		config_channel_init_epg(conf, c, enow, enext);
@@ -526,12 +613,12 @@ void config_load(CONFIG *conf, int argc, char **argv) {
 				break;
 			case 'm':
 				conf->pcr_mode = atoi(optarg);
-				if (conf->pcr_mode < 0 || conf->pcr_mode > 4)
+				if (conf->pcr_mode < 0 || conf->pcr_mode > 3)
 					conf->pcr_mode = 0;
 				break;
 			case 't':
 				ttl = atoi(optarg);
-				conf->multicast_ttl = (ttl && ttl < 127) ? ttl : 1;
+				conf->multicast_ttl = (ttl >= 0 && ttl <= 255) ? ttl : 1;
 				break;
 			case 'l':
 				conf->loghost = strdup(optarg);

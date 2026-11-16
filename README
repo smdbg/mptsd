@@ -1,3 +1,6 @@
+Standalone fork documentation: README.md, CHANGELOG.md and docs/.
+The original upstream notes follow below.
+
 mptsd
 =====
 mptsd receives mpegts streams from multicast (udp/rtp) or http and combines

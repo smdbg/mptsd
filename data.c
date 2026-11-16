@@ -1,3 +1,4 @@
+/* smdbg fork modifications, 2026-11-16: see CHANGELOG.md. */
 /*
  * mptsd data
  * Copyright (C) 2010-2011 Unix Solutions Ltd.
@@ -241,9 +242,12 @@ void input_stream_free(INPUT *input) {
 	input->stream.pmt_pid    = 0;
 	input->stream.pcr_pid    = 0;
 	input->stream.input_pcr  = 0;
+	input->stream.input_service_id = 0;
+	memset(&input->stream.eit_forward, 0, sizeof(input->stream.eit_forward));
 }
 
 void input_stream_reset(INPUT *input) {
+    ca_input_reset(input);
 	input_stream_free(input);
 	input_stream_alloc(input);
 }
@@ -255,6 +259,7 @@ INPUT * input_new(const char *name, CHANNEL *channel) {
 	r->name = strdup(name);
 	r->sock = -1;
 	r->channel = channel;
+    ca_input_init(r);
 
 	if (config->write_input_file) {
 		if (asprintf(&tmp, "mptsd-input-%s.ts", channel->id) > 0)
@@ -281,6 +286,7 @@ void input_free(INPUT **pinput) {
 		close(r->ifd);
 
 	input_stream_free(r);
+    ca_input_free(r);
 
 	cbuf_free(&r->buf);
 
@@ -373,6 +379,7 @@ void output_free(OUTPUT **po) {
 	FREE(o->obuf[0].buf);
 	FREE(o->obuf[1].buf);
 	output_psi_free(o);
+	FREE(o->status.path);
 	FREE(*po);
 }
 

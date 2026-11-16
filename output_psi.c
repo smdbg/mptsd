@@ -1,3 +1,4 @@
+/* smdbg fork modifications, 2026-11-16: see CHANGELOG.md. */
 /*
  * mptsd output PSI handling
  * Copyright (C) 2010-2011 Unix Solutions Ltd.
@@ -36,140 +37,57 @@ static void output_psi_init_pat(CONFIG *conf, OUTPUT *o) {
 		ts_pat_add_program(o->pat, c->service_id, c->pmt_pid);
 	}
 	list_unlock(conf->channels);
+	o->pat->section_header->version_number = conf->table_version;
+	ts_pat_regenerate_packets(o->pat);
 	gettimeofday(&o->pat_ts, NULL);
 }
 
 static void output_psi_init_nit(CONFIG *conf, OUTPUT *o) {
-	struct ts_nit *nit = ts_nit_alloc_init(conf->network_id);
-
-	ts_nit_add_network_name_descriptor(nit, conf->network_name);
-
-	if (!conf->use_lcn) {
-
-		if (conf->nit->items < 64) {
-			int num;
-			LNODE *lc, *lctmp;
-			uint32_t *freqs = malloc(conf->nit->items * sizeof(uint32_t));
-			uint32_t *services = malloc(conf->channels->items * sizeof(uint32_t));
-
-			num = 0;
-			list_lock(conf->nit);
-			list_for_each(conf->nit, lc, lctmp) {
-				NIT *ndata = lc->data;
-				freqs[num++] = ndata->_freq;
-			}
-
-			ts_nit_add_frequency_list_descriptor_cable(nit, conf->transport_stream_id, conf->network_id, freqs, num);
-
-			list_for_each(conf->nit, lc, lctmp) {
-				NIT *ndata = lc->data;
-				ts_nit_add_cable_delivery_descriptor(nit, ndata->ts_id, conf->network_id, ndata->_freq, ndata->_modulation, ndata->_symbol_rate);
-			}
-			list_unlock(conf->nit);
-
-			num = 0;
-			list_lock(conf->channels);
-			list_for_each(conf->channels, lc, lctmp) {
-				CHANNEL *c = lc->data;
-				uint32_t srv = 0;
-				srv  = (c->service_id &~ 0x00ff) << 8;
-				srv |= (c->service_id &~ 0xff00) << 8;
-				srv |= c->radio ? 0x02 : 0x01;
-				services[num++] = srv;
-			}
-			list_unlock(conf->channels);
-
-			ts_nit_add_service_list_descriptor(nit, conf->transport_stream_id, conf->network_id, services, num);
-			free(freqs);
-			free(services);
-		} else {
-			LOG("CONF  : Too much items in the NIT, maximum is 64! NIT not generated.\n");
-		}
-
-	} else {
-
-		int num;
-		char *ts_freq = NULL;
-		char *ts_modulation = NULL;
-		char *ts_symbol_rate = NULL;
-		uint32_t ts__freq = 0;
-		uint8_t ts__modulation = 0;
-		uint32_t ts__symbol_rate = 0;
-		LNODE *lc, *lctmp;
-		uint32_t *svc_services = malloc(conf->channels->items * sizeof(uint32_t));
-		uint32_t *lcn_services = malloc(conf->channels->items * sizeof(uint32_t));
-
-		list_lock(conf->nit);
-		list_for_each(conf->nit, lc, lctmp) {
-			NIT *ndata = lc->data;
-			if (ndata->ts_id == conf->transport_stream_id) {
-				ts_freq = ndata->freq;
-				ts_modulation = ndata->modulation;
-				ts_symbol_rate = ndata->symbol_rate;
-				ts__freq = ndata->_freq;
-				ts__modulation = ndata->_modulation;
-				ts__symbol_rate = ndata->_symbol_rate;
-			}
-		}
-		list_unlock(conf->nit);
-
-		list_lock(conf->channels);
-		num = 0;
-		list_for_each(conf->channels, lc, lctmp) {
-				CHANNEL *c = lc->data;
-				uint32_t srv = 0;
-				srv  = (c->service_id &~ 0x00ff) << 16;
-				srv |= (c->service_id &~ 0xff00) << 16;
-				srv |= (c->lcn_visible ? 0x01 : 0x00 &~ 0xf0 ) << 15;
-				srv |= (0X00 &~ 0xf0 ) << 14;
-				srv |= (c->lcn &~ 0xc0ff);
-				srv |= (c->lcn &~ 0xff00);
-				lcn_services[num++] = srv;
-		}
-
-		num = 0;
-		list_for_each(conf->channels, lc, lctmp) {
-				CHANNEL *c = lc->data;
-				uint32_t srv = 0;
-				srv  = (c->service_id &~ 0x00ff) << 8;
-				srv |= (c->service_id &~ 0xff00) << 8;
-				srv |= c->radio ? 0x02 : 0x01;
-				svc_services[num++] = srv;
-		}
-		list_unlock(conf->channels);
-
-		NIT *ts_ndata = nit_new(conf->transport_stream_id, ts_freq, ts_modulation, ts_symbol_rate);
-		ts_nit_add_stream_descriptors(nit, ts_ndata->ts_id, conf->network_id, ts__freq, ts__modulation, ts__symbol_rate, lcn_services, svc_services, num);
-
-		if (conf->nit->items < 64) {
-			list_lock(conf->nit);
-				list_for_each(conf->nit, lc, lctmp) {
-				NIT *ndata = lc->data;
-				ts_nit_add_cable_delivery_descriptor(nit, ndata->ts_id, conf->network_id, ndata->_freq, ndata->_modulation, ndata->_symbol_rate);
-			}
-			list_unlock(conf->nit);
-
-			free(lcn_services);
-			free(svc_services);
-		} else {
-			LOG("CONF  : Too much items in the NIT, maximum is 64! NIT not generated.\n");
-		}
-
-	}
-
-	gettimeofday(&o->nit_ts, NULL);
-	o->nit = nit;
+    struct ts_nit *nit = ts_nit_alloc_init(conf->network_id);
+    if (!ts_nit_add_network_name_descriptor(nit, conf->network_name)) {
+        LOG("CONFIG: Invalid NIT network name.\n"); exit(1);
+    }
+    LNODE *lc, *lctmp;
+    list_lock(conf->nit);
+    list_for_each(conf->nit, lc, lctmp) {
+        NIT *n = lc->data;
+        /* Backwards compatibility for manually maintained old config files. */
+        if (!n->services_defined && n->ts_id == conf->transport_stream_id) {
+            LNODE *cc, *ctmp;
+            list_for_each(conf->channels, cc, ctmp) {
+                CHANNEL *c = cc->data;
+                int j = n->services_count++;
+                n->services[j] = (c->service_id << 8) | (c->radio ? 2 : 1);
+                n->lcns[j] = ((uint32_t)c->service_id << 16) | (c->lcn_visible << 15) | 0x7c00 | c->lcn;
+            }
+        }
+        if (!ts_nit_add_stream_descriptors(nit, n->ts_id, conf->original_network_id,
+            n->_freq, n->_modulation, n->_symbol_rate,
+            conf->use_lcn ? n->lcns : NULL, n->services, n->services_count)) {
+            LOG("CONFIG: NIT exceeds DVB section capacity; reduce network size.\n"); exit(1);
+        }
+    }
+    list_unlock(conf->nit);
+    nit->section_header->version_number = conf->table_version;
+    ts_nit_regenerate_packet_data(nit);
+    gettimeofday(&o->nit_ts, NULL);
+    o->nit = nit;
 }
 
 static void output_psi_init_sdt(CONFIG *conf, OUTPUT *o) {
 	LNODE *lc, *lctmp;
-	struct ts_sdt *sdt = ts_sdt_alloc_init(conf->network_id, conf->transport_stream_id);
+	struct ts_sdt *sdt = ts_sdt_alloc_init(conf->original_network_id, conf->transport_stream_id);
 	list_lock(conf->channels);
 	list_for_each(conf->channels, lc, lctmp) {
 		CHANNEL *c = lc->data;
-		ts_sdt_add_service_descriptor(sdt, c->service_id, c->radio == 0, conf->provider_name, c->name);
+		if (!ts_sdt_add_service_descriptor(sdt, c->service_id, c->radio == 0, conf->provider_name, c->name)) {
+			LOG("CONFIG: SDT exceeds DVB section or text capacity.\n"); exit(1);
+		}
+		sdt->streams[sdt->streams_num - 1]->EIT_schedule_flag = c->eit_mode == 1;
 	}
 	list_unlock(conf->channels);
+	sdt->section_header->version_number = conf->table_version;
+	ts_sdt_regenerate_packet_data(sdt);
 	gettimeofday(&o->sdt_ts, NULL);
 	o->sdt = sdt;
 }
@@ -259,19 +177,9 @@ static void output_add_tot(OUTPUT *o) {
 }
 
 static void __output_add_eit(OUTPUT *o, struct ts_eit *eit) {
-	if (!eit)
-		return;
-//	LOGf("OUTPUT: Outputing EIT\n");
-	int i, pcnt = o->pid_eit_cont;
-	if (eit->section_header && eit->section_header->packet_data) {
-		for (i=0;i<eit->section_header->num_packets;i++) {
-			ts_packet_set_cont(eit->section_header->packet_data + (i * TS_PACKET_SIZE), i + pcnt);
-		}
-		eit->ts_header.continuity = pcnt;
-		o->pid_eit_cont += eit->section_header->num_packets;
-		cbuf_fill(o->psibuf, eit->section_header->packet_data, eit->section_header->num_packets * TS_PACKET_SIZE);
-	}
-//	ts_eit_dump(eit);
+    if (eit && eit->section_header && eit->section_header->packet_data)
+        cbuf_fill(o->psibuf, eit->section_header->packet_data,
+                  eit->section_header->num_packets * TS_PACKET_SIZE);
 }
 
 static void output_add_eit(CONFIG *conf, OUTPUT *o) {
@@ -279,6 +187,7 @@ static void output_add_eit(CONFIG *conf, OUTPUT *o) {
 	config_load_epg(conf);
 	list_for_each(conf->inputs, lr, lrtmp) {
 		INPUT *r = lr->data;
+		if (r->channel->eit_mode == 1) continue;
 		__output_add_eit(o, r->channel->eit_now);
 		__output_add_eit(o, r->channel->eit_next);
 	}
@@ -321,6 +230,7 @@ void output_psi_init(CONFIG *conf, OUTPUT *output) {
 }
 
 void output_psi_free(OUTPUT *o) {
+    ca_output_free(o);
 	ts_pat_free(&o->pat);
 	ts_nit_free(&o->nit);
 	ts_sdt_free(&o->sdt);
@@ -336,6 +246,7 @@ void * output_handle_psi(void *_config) {
 	signal(SIGPIPE, SIG_IGN);
 	while (!o->dienow) {
 		gettimeofday(&now, NULL);
+		ca_output_tick(o, &now);
 		output_psi_add(conf, o, &now);
 		usleep(10000); // 10 ms
 	}

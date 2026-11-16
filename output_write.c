@@ -1,3 +1,4 @@
+/* smdbg fork modifications, 2026-11-16: see CHANGELOG.md. */
 /*
  * mptsd output writing
  * Copyright (C) 2010-2011 Unix Solutions Ltd.
@@ -48,6 +49,7 @@ void increase_process_priority() {
 }
 
 void ts_frame_process(CONFIG *conf, OUTPUT *o, uint8_t *data) {
+	o->frame_null_packets = 0;
 	int i;
 	uint16_t pid;
 	uint8_t *ts_packet;
@@ -58,6 +60,7 @@ void ts_frame_process(CONFIG *conf, OUTPUT *o, uint8_t *data) {
 		if (pid == 0x1fff) { // NULL packet
 			ts_packet[3] = 0x10; // set no adaptation field, payload only
 			o->padding_period += TS_PACKET_SIZE;
+			o->frame_null_packets++;
 		}
 
 		if (ts_packet_has_pcr(ts_packet)) {
@@ -112,6 +115,9 @@ ssize_t ts_frame_write(OUTPUT *o, uint8_t *data) {
 		written2 = write(o->ofd, data, FRAME_PACKET_SIZE);
 	else written2 = 0;
 
+    output_status_account(&o->status,
+        (o->status.network_output ? written : written2) == FRAME_PACKET_SIZE,
+        o->frame_null_packets);
 	if (written2 > written)
 		written = written2;
 	if (written >= 0) {
@@ -161,6 +167,9 @@ ssize_t ts_frame_write_rtp(OUTPUT *o, uint8_t *data) {
 		written2 = write(o->ofd, data, FRAME_PACKET_SIZE);
 	else written2 = 0;
 
+    output_status_account(&o->status,
+        o->status.network_output ? written == (ssize_t)write_len : written2 == FRAME_PACKET_SIZE,
+        o->frame_null_packets);
 	if (written2 > written)
 		written = written2 + RTP_HEADER_SIZE;
 	if (written >= RTP_HEADER_SIZE) {
@@ -186,6 +195,8 @@ void * output_handle_write(void *_config) {
 
 	increase_process_priority();
 
+	o->status.network_output = conf->write_output_network;
+	output_status_start(&o->status);
 	gettimeofday(&stats_ts, NULL);
 	while (!o->dienow) {
 		gettimeofday(&now, NULL);
@@ -276,6 +287,8 @@ void * output_handle_write(void *_config) {
 			//LOGf("Writen for +%llu us more\n", write_time - o->obuf_ms*1000);
 		}
 
+		if (output_status_maybe_publish(&o->status) < 0)
+			LOGf("STAT: Could not publish status: %s\n", strerror(errno));
 		obuf_reset(curbuf); // Buffer us all used up
 		buf_in_use = buf_in_use ? 0 : 1; // Switch buffer
 		if (written < 0) {
